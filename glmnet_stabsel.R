@@ -109,6 +109,19 @@ results_to_measures <- function(pred_scores, pred_labels){
   return(results)
 }
 
+results_to_measures_regression <- function(predictions, targets){
+  library(ModelMetrics)
+  mse_errors <- c()
+  mae_errors <- c()
+  for (i in 1:length(predictions)) {
+    pred <- unlist(predictions[[i]], use.names = F)
+    targ <- unlist(targets[[i]], use.names = F)
+    mse_errors <- c(mse_errors, mse(pred, targ))
+    mae_errors <- c(mae_errors, mae(pred, targ))
+  }
+  c('mean_mse' = mean(mse_errors), 'mean_mae' = mean(mae_errors))
+}
+
 p_val <- function(null, measured) {
   1 - (length(null[null <= measured])/(length(null) + 1))
 }
@@ -116,7 +129,7 @@ p_val <- function(null, measured) {
 
 # allow multicore processing
 library(doMC)
-registerDoMC(cores = 5)
+registerDoMC(cores = 4)
 
 # Load example data
 data(dhfr) # Dihydrofolate Reductase Inhibitors Data, from caret package
@@ -129,7 +142,9 @@ data.Y <- as.numeric(data.Y)
 data.Y.multinomial <- data.Y
 data.Y.multinomial[sample(1:length(data.Y), 60)] <- 3
 
-
+# create some noisy target values for regression
+data.Y.regression <- rowSums(scale(data.X[,1:20]))
+data.Y.regression <- jitter(data.Y.regression, amount = 8)  # add noise
 
 # predictions -------------------------------------------------------------
 
@@ -148,6 +163,13 @@ results_to_measures(results[[1]], results[[2]])
 # in the case of multinomial prediction, one vs. all measures are computed
 # for each group
 results_to_measures(results_multinomial[[1]], results_multinomial[[2]])
+
+#regression
+results_regression <- run_repeated_cv(data.X, data.Y.regression,
+                                       n_folds = 2, repeats = 2,
+                                       alpha = 0.5, family = 'gaussian')
+# and the regression performance
+results_to_measures_regression(results_regression[[1]], results_regression[[2]])
 
 
 # statistical signifficance of the whole model ----------------------------
@@ -192,7 +214,7 @@ for (i in 1:n_perm) {
 measured_auc_multinomial <- results_to_measures(results_multinomial[[1]],
                                                 results_multinomial[[2]])
 
-# we can see that predictions for gorup 1 and two are signifficant, but not
+# we can see that predictions for group 1 and two are signifficant, but not
 # for group three, which is expected, since it contains random samples
 for (group in 1:length(measures_null_dist_multinomial[[1]])) {
   group_null <- lapply(measures_null_dist_multinomial, function(x){return(x[[group]])})
@@ -200,6 +222,29 @@ for (group in 1:length(measures_null_dist_multinomial[[1]])) {
   group_measured_auc <- measured_auc_multinomial[[group]]['mean_auc']
   print(c(group, p_val(group_null, group_measured_auc)))
 }
+
+
+# perm test for regression
+n_perm <- 100
+measures_null_dist_regression <- list()
+for (i in 1:n_perm) {
+  print(i)
+  Y.shuffled <- sample(data.Y.regression)
+  res <- run_repeated_cv(data.X, Y.shuffled,
+                         n_folds = 2, repeats = 2,
+                         alpha = 0.5, family = 'gaussian')
+  measures_null_dist_regression[[i]] <- results_to_measures_regression(res[[1]], res[[2]])
+}
+
+measured_regression_errors <- results_to_measures_regression(results_regression[[1]], results_regression[[2]])
+measures_null_dist_regression <- do.call(rbind, measures_null_dist_regression)
+
+null_mse <- measures_null_dist_regression[,'mean_mse']
+null_mae <- measures_null_dist_regression[,'mean_mae']
+# since this is error, lower is better, so we will reverse it by multyiplying
+# everything by -1, so our p values are still valid
+p_val(null_mse*-1, measured_regression_errors['mean_mse']*-1)
+p_val(null_mae*-1, measured_regression_errors['mean_mae']*-1)
 
 
 
@@ -232,5 +277,16 @@ results_to_measures(results.stable.vars[[1]], results.stable.vars[[2]])
 # the same method can be used for multionomial prediction changing
 # the family parameter to 'multinomial'
 
-
-
+# same for regression
+stabpath.obj <- stabpath(as.matrix(data.Y.regression), as.matrix(data.X),
+                         family = "gaussian", mc.cores = 4, alpha = 0.5,
+                         weakness = 1, steps = 1000, standardize = T)
+stabsel.obj <- stabsel(stabpath.obj, error = 0.05, pi_thr = 0.75, type = 'pfer')
+# stable vars
+stabsel.obj$stable
+# plot
+plot(stabpath.obj, error = 0.05, pi_thr = 0.75, type = 'pfer')
+# names of variables used to create the target value
+# we can see that there are no false positives, but many we recovered
+# only 2/20 variables
+names(data.X[,1:20])
